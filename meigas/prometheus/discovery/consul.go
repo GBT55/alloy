@@ -360,7 +360,6 @@ func (d *Discovery) Run(ctx context.Context, ch chan<- []*targetgroup.Group) {
 
 		// Watched services and their cancellation functions.
 		services := make(map[string]func())
-		var lastIndex uint64
 
 		for {
 			select {
@@ -368,14 +367,14 @@ func (d *Discovery) Run(ctx context.Context, ch chan<- []*targetgroup.Group) {
 				ticker.Stop()
 				return
 			default:
-				d.watchServices(ctx, ch, &lastIndex, services)
+				d.watchServices(ctx, ch, services)
 				<-ticker.C
 			}
 		}
 	} else {
 		// We only have fully defined services.
 		for _, name := range d.watchedServices {
-			d.watchService(ctx, ch, name)
+			d.watchService(ctx, ch, d.clientNamespace, name)
 		}
 		<-ctx.Done()
 	}
@@ -384,7 +383,7 @@ func (d *Discovery) Run(ctx context.Context, ch chan<- []*targetgroup.Group) {
 // Watch the catalog for new services we would like to watch. This is called only
 // when we don't know yet the names of the services and need to ask Consul the
 // entire list of services.
-func (d *Discovery) watchServices(ctx context.Context, ch chan<- []*targetgroup.Group, lastIndex *uint64, services map[string]func()) {
+func (d *Discovery) watchServices(ctx context.Context, ch chan<- []*targetgroup.Group, services map[string]func()) {
 	catalog := d.client.Catalog()
 
 	namespaces, err := d.getNamespaces(ctx)
@@ -393,72 +392,103 @@ func (d *Discovery) watchServices(ctx context.Context, ch chan<- []*targetgroup.
 		return
 	}
 
-	for _, _ = range namespaces {
-		d.logger.Debug("Watching services", "tags", strings.Join(d.watchedTags, ","), "filter", d.watchedFilter)
+	// Process all namespaces in parallel to avoid blocking on WaitTime
+	type namespaceResult struct {
+		namespace string
+		services  map[string][]string
+		err       error
 	}
 
-	opts := &consul.QueryOptions{
-		// Namespace:  "*",
-		WaitIndex:  *lastIndex,
-		WaitTime:   watchTimeout,
-		AllowStale: d.allowStale,
-		NodeMeta:   d.watchedNodeMeta,
-		Filter:     d.watchedFilter,
-	}
-	t0 := time.Now()
-	srvs, meta, err := catalog.Services(opts.WithContext(ctx))
-	elapsed := time.Since(t0)
-	d.metrics.servicesRPCDuration.Observe(elapsed.Seconds())
+	resultsChan := make(chan namespaceResult, len(namespaces))
 
-	// Check the context before in order to exit early.
-	select {
-	case <-ctx.Done():
-		return
-	default:
-	}
-
-	if err != nil {
-		d.logger.Error("Error refreshing service list", "err", err)
-		d.metrics.rpcFailuresCount.Inc()
-		time.Sleep(retryInterval)
-		return
-	}
-	// If the index equals the previous one, the watch timed out with no update.
-	if meta.LastIndex == *lastIndex {
-		return
-	}
-	*lastIndex = meta.LastIndex
-
-	// Check for new services.
-	for name := range srvs {
-		// catalog.Service() returns a map of service name to tags, we can use that to watch
-		// only the services that have the tag we are looking for (if specified).
-		// In the future consul will also support server side for service metadata.
-		// https://github.com/hashicorp/consul/issues/1107
-		if !d.shouldWatch(name, srvs[name]) {
-			continue
-		}
-		if _, ok := services[name]; ok {
-			continue // We are already watching the service.
-		}
-
-		wctx, cancel := context.WithCancel(ctx)
-		d.watchService(wctx, ch, name)
-		services[name] = cancel
-	}
-
-	// Check for removed services.
-	for name, cancel := range services {
-		if _, ok := srvs[name]; !ok {
-			// Call the watch cancellation function.
-			cancel()
-			delete(services, name)
-
-			// Send clearing target group.
+	for _, ns := range namespaces {
+		go func(namespace string) {
+			// Check the context before in order to exit early.
 			select {
 			case <-ctx.Done():
 				return
-			case ch <- []*targetgroup.Group{{Source: name}}:
+			default:
+			}
+
+			d.logger.Debug("Watching services", "namespace", namespace, "tags", strings.Join(d.watchedTags, ","), "filter", d.watchedFilter)
+			opts := &consul.QueryOptions{
+				Namespace:  namespace,
+				WaitIndex:  0, // Don't use blocking queries when checking multiple namespaces
+				AllowStale: d.allowStale,
+				NodeMeta:   d.watchedNodeMeta,
+				Filter:     d.watchedFilter,
+			}
+			t0 := time.Now()
+			srvs, _, err := catalog.Services(opts.WithContext(ctx))
+			elapsed := time.Since(t0)
+			d.metrics.servicesRPCDuration.Observe(elapsed.Seconds())
+
+			if err != nil {
+				d.logger.Error("Error refreshing service list", "namespace", namespace, "err", err)
+				d.metrics.rpcFailuresCount.Inc()
+			}
+
+			resultsChan <- namespaceResult{
+				namespace: namespace,
+				services:  srvs,
+				err:       err,
+			}
+		}(ns)
+	}
+
+	// Collect results from all namespaces
+	allNamespaceServices := make(map[string]map[string][]string)
+	for i := 0; i < len(namespaces); i++ {
+		select {
+		case <-ctx.Done():
+			return
+		case result := <-resultsChan:
+			if result.err == nil {
+				allNamespaceServices[result.namespace] = result.services
+			}
+		}
+	}
+
+	// Process services from all namespaces
+	for namespace, srvs := range allNamespaceServices {
+		// Check for new services.
+		for name := range srvs {
+			// catalog.Service() returns a map of service name to tags, we can use that to watch
+			// only the services that have the tag we are looking for (if specified).
+			// In the future consul will also support server side for service metadata.
+			// https://github.com/hashicorp/consul/issues/1107
+			if !d.shouldWatch(name, srvs[name]) {
+				continue
+			}
+
+			serviceKey := namespace + ":" + name
+
+			if _, ok := services[serviceKey]; ok {
+				continue // We are already watching the service.
+			}
+
+			wctx, cancel := context.WithCancel(ctx)
+			d.watchService(wctx, ch, namespace, name)
+			services[serviceKey] = cancel
+		}
+
+		// Check for removed services in this namespace
+		for serviceKey, cancel := range services {
+			parts := strings.SplitN(serviceKey, ":", 2)
+			if len(parts) != 2 || parts[0] != namespace {
+				continue
+			}
+			serviceName := parts[1]
+
+			if _, ok := srvs[serviceName]; !ok {
+				cancel()
+				delete(services, serviceKey)
+
+				select {
+				case <-ctx.Done():
+					return
+				case ch <- []*targetgroup.Group{{Source: serviceKey}}:
+				}
 			}
 		}
 	}
@@ -475,6 +505,7 @@ func (d *Discovery) watchServices(ctx context.Context, ch chan<- []*targetgroup.
 
 // consulService contains data belonging to the same service.
 type consulService struct {
+	namespace          string
 	name               string
 	tags               []string
 	labels             model.LabelSet
@@ -487,10 +518,11 @@ type consulService struct {
 }
 
 // Start watching a service.
-func (d *Discovery) watchService(ctx context.Context, ch chan<- []*targetgroup.Group, name string) {
+func (d *Discovery) watchService(ctx context.Context, ch chan<- []*targetgroup.Group, namespace string, name string) {
 	srv := &consulService{
 		discovery: d,
 		client:    d.client,
+		namespace: namespace,
 		name:      name,
 		tags:      d.watchedTags,
 		labels: model.LabelSet{
@@ -526,9 +558,10 @@ func (d *Discovery) watchService(ctx context.Context, ch chan<- []*targetgroup.G
 
 // Get updates for a service.
 func (srv *consulService) watch(ctx context.Context, ch chan<- []*targetgroup.Group, health *consul.Health, lastIndex *uint64) {
-	srv.logger.Debug("Watching service", "service", srv.name, "tags", strings.Join(srv.tags, ","))
+	srv.logger.Debug("Watching service", "namespace", srv.namespace, "service", srv.name, "tags", strings.Join(srv.tags, ","))
 
 	opts := &consul.QueryOptions{
+		Namespace:  srv.namespace,
 		WaitIndex:  *lastIndex,
 		WaitTime:   watchTimeout,
 		AllowStale: srv.discovery.allowStale,
