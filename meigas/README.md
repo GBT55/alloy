@@ -1,0 +1,2 @@
+- use namespace = "*" to use the new functionality 
+- use namespace = "xxxxx" to use the old functionality
