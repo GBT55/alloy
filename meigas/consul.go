@@ -82,10 +82,6 @@ var DefaultSDConfig = SDConfig{
 	HTTPClientConfig: config.DefaultHTTPClientConfig,
 }
 
-func init() {
-	discovery.RegisterConfig(&SDConfig{})
-}
-
 // SDConfig is the configuration for Consul service discovery.
 type SDConfig struct {
 	Server       string        `yaml:"server,omitempty"`
