@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"time"
 
+	prom_discovery "github.com/grafana/alloy/meigas"
 	config_util "github.com/prometheus/common/config"
 	"github.com/prometheus/common/model"
-	prom_discovery "github.com/prometheus/prometheus/discovery/consul"
 
 	"github.com/grafana/alloy/internal/component"
 	"github.com/grafana/alloy/internal/component/common/config"
