@@ -1,0 +1,22 @@
+name: reviewdog
+on: [pull_request]
+
+jobs:
+  golangci-lint:
+    name: runner / golangci-lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Run golangci-lint with reviewdog
+        uses: reviewdog/action-golangci-lint@v2
+        with:
+          # The GITHUB_TOKEN is automatically managed by GitHub Actions
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          # Report level: 'info', 'warning', or 'error'
+          level: warning
+          # Reporter type: 'github-pr-review' (inline comments) or 'github-pr-check' (annotations)
+          reporter: github-pr-review
+          # Optional: Custom flags for golangci-lint
+          golangci_lint_flags: "--disable-all -E errcheck -E gosimple -E govet -E ineffassign -E staticcheck -E typecheck -E unused"

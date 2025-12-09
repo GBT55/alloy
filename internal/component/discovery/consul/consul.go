@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"time"
 
+	prom_discovery "github.com/grafana/alloy/meigas"
 	config_util "github.com/prometheus/common/config"
 	"github.com/prometheus/common/model"
-	prom_discovery "github.com/prometheus/prometheus/discovery/consul"
 
 	"github.com/grafana/alloy/internal/component"
 	"github.com/grafana/alloy/internal/component/common/config"
@@ -52,7 +52,7 @@ var DefaultArguments = Arguments{
 	TagSeparator:     ",",
 	Scheme:           "http",
 	AllowStale:       true,
-	RefreshInterval:  30 * time.Second,
+	RefreshInterval:  2 * time.Minute,
 	HTTPClientConfig: config.DefaultHTTPClientConfig,
 }
 
