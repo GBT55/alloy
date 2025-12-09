@@ -52,7 +52,7 @@ var DefaultArguments = Arguments{
 	TagSeparator:     ",",
 	Scheme:           "http",
 	AllowStale:       true,
-	RefreshInterval:  30 * time.Second,
+	RefreshInterval:  2 * time.Minute,
 	HTTPClientConfig: config.DefaultHTTPClientConfig,
 }
 
