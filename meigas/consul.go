@@ -316,13 +316,6 @@ func (d *Discovery) initialize(ctx context.Context) {
 			continue
 		}
 
-		// Get the Namespace(s) name
-		err = d.getNamespaces(ctx)
-		if err != nil {
-			time.Sleep(retryInterval)
-			continue
-		}
-
 		// We are good to go.
 		return
 	}
@@ -343,17 +336,18 @@ func (d *Discovery) Run(ctx context.Context, ch chan<- []*targetgroup.Group) {
 		servicesByNamespace := make(map[string]map[string]func())
 		indexByNamespace := make(map[string]uint64)
 
-		for _, ns := range d.clientNamespaces {
-			servicesByNamespace[ns] = make(map[string]func())
-			indexByNamespace[ns] = 0
-		}
-
 		for {
 			select {
 			case <-ctx.Done():
 				ticker.Stop()
 				return
 			default:
+				d.getNamespaces(ctx)
+				for _, ns := range d.clientNamespaces {
+					servicesByNamespace[ns] = make(map[string]func())
+					indexByNamespace[ns] = 0
+				}
+
 				d.watchServices(ctx, ch, indexByNamespace, servicesByNamespace)
 				<-ticker.C
 			}
@@ -368,22 +362,32 @@ func (d *Discovery) Run(ctx context.Context, ch chan<- []*targetgroup.Group) {
 }
 
 // getNamespaces uses the Consul api to retrieve all the available namespaces (enterprise only).
-func (d *Discovery) getNamespaces(ctx context.Context) error {
+func (d *Discovery) getNamespaces(ctx context.Context) {
+	var lastIndex uint64
+
 	if d.clientNamespace != "*" {
 		d.clientNamespaces = []string{d.clientNamespace}
-		return nil
+		return
 	}
 
 	opts := &consul.QueryOptions{
 		AllowStale: d.allowStale,
+		WaitIndex:  lastIndex,
+		WaitTime:   watchTimeout,
 	}
 
-	namespaces, _, err := d.client.Namespaces().List(opts.WithContext(ctx))
+	namespaces, meta, err := d.client.Namespaces().List(opts.WithContext(ctx))
 	if err != nil {
 		d.logger.Error("Error fetching namespaces", "err", err)
 		d.metrics.rpcFailuresCount.Inc()
-		return err
+		time.Sleep(retryInterval)
+		return
 	}
+
+	if meta.LastIndex == lastIndex {
+		return
+	}
+	lastIndex = meta.LastIndex
 
 	nsNames := make([]string, len(namespaces))
 	for i, ns := range namespaces {
@@ -391,7 +395,7 @@ func (d *Discovery) getNamespaces(ctx context.Context) error {
 	}
 
 	d.clientNamespaces = nsNames
-	return nil
+	return
 }
 
 // Watch the catalog for new services we would like to watch. This is called only
